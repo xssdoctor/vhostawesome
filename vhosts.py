@@ -2,11 +2,13 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 import argparse
 import logging
-from itertools import repeat
+from itertools import islice
 import os
 import json
 import urllib3
+from time import sleep
 from termcolor import colored
+from itertools import repeat
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 cwd = os.getcwd()
@@ -38,8 +40,10 @@ for handler in logger.handlers:
 class Vhosts:
     def __init__(self, domain: str, iplistFile: str, wordlist: str, outputFolder: str, ports: list, workers=50):
         self.ports = ports
+        self.chunk_counter = 0
         self.finaldict = {}
         self.filtered_dict = {}
+        self.wordlist = wordlist
         self.domain = domain
         self.workers = workers
         self.iplist = []
@@ -65,6 +69,17 @@ class Vhosts:
         except Exception as e:
             logging.error(f"Error reading file: {e}")
         self.urllist = []
+
+    def domain_generator(self):
+        with open(self.wordlist, 'r') as r:
+            for word in r:
+                yield f"{word.strip()}.{self.domain}"
+
+    def save_to_disk(self, data):
+        """Append results directly to a file."""
+        with open(self.allDomainInfoFile, 'a') as w:
+            json.dump(data, w)
+            w.write('\n')
 
     def _checkPort(self, ip, port):
         url = f"https://{ip}:{port}" if port in [443,
@@ -103,7 +118,8 @@ class Vhosts:
             # Update the data for the specific domain under the given URL
             self.finaldict[url][domain] = data
         except Exception as e:
-            logging.error(f"Error getting {url}: {e}")
+            logging.error(f"Error fetching {url}: {e}")
+        return domain, data
 
     def filterUrl(self, url):
         threshold = 5
@@ -146,17 +162,31 @@ class Vhosts:
 
     def getAllDomainsFromUrl(self, url: str):
         logging.info(f"Trying {url}")
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            executor.map(self.getSingleUrl, repeat(
-                url, len(self.domainList)), self.domainList)
-        filtered = self.filterUrl(url)
-        for domain, data in filtered.items():
-            logging.critical(f"found {url}: {domain}")
-            try:
-                with open(self.filtereddomainsFile, 'a') as w:
-                    w.write(f"{url}: {domain}\n")
-            except Exception as e:
-                logging.error(f"Error writing to file: {e}")
+        url_data = {}  # Dictionary for this specific URL
+
+        domains_gen = self.domain_generator()
+        batch_size = 100  # Fetch 100 domains at a time, adjust this value as needed
+
+        while True:
+            batch = list(islice(domains_gen, batch_size))
+            if not batch:
+                break
+
+            with ThreadPoolExecutor(max_workers=self.workers) as executor:
+                results = executor.map(
+                    self.getSingleUrl, repeat(url, len(batch)), batch)
+
+            # Aggregate results for this URL
+            for domain, data in results:
+                if domain:  # If there's valid data
+                    if domain not in url_data:
+                        url_data[domain] = {}
+                    url_data[domain] = data
+
+            sleep(1)  # Pause after each batch for rate limiting
+
+        # Save this URL's data to disk
+        self.save_to_disk(url_data)
 
     def getAllIps(self):
         for url in self.urllist:
@@ -182,21 +212,18 @@ if __name__ == "__main__":
     argparser.add_argument("-o", "--output", required=True, help="Output file")
     argparser.add_argument("-p", "--ports", required=False,
                            help="Ports to scan. if left out, it will scan 80, 8080, 443, 8443, 4443")
+
     args = argparser.parse_args()
     if args.ports:
         ports = [int(port) for port in args.ports.split(",")]
     else:
         ports = [80, 8080, 443, 8443, 4443]
+
     if args.threads:
-        global vhosts
-        vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
-                        wordlist=args.wordlist, outputFolder=args.output, ports=ports, workers=int(args.threads))
+        vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist, wordlist=args.wordlist,
+                        outputFolder=args.output, ports=ports, workers=int(args.threads))
     else:
         vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
                         wordlist=args.wordlist, ports=ports, outputFolder=args.output)
+
     vhosts.makeItSo()
-    try:
-        with open(vhosts.allDomainInfoFile, 'w') as w:
-            json.dump(vhosts.finaldict, w)
-    except Exception as e:
-        logging.error(f"Error writing to file: {e}")
