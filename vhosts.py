@@ -26,13 +26,16 @@ class ColoredFormatter(logging.Formatter):
         return colored(log_message, self.COLORS.get(record.levelname))
 
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s %(levelname)s %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S')
-logger = logging.getLogger()
-for handler in logger.handlers:
-    handler.setFormatter(ColoredFormatter(
-        '%(asctime)s %(levelname)s %(message)s'))
+def logLevel(level="info"):
+    logdict = {"debug": logging.DEBUG, "info": logging.INFO,
+               "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL}
+    logging.basicConfig(level=logdict[level],  # Corrected line
+                        format='%(asctime)s %(levelname)s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
+    logger = logging.getLogger()
+    for handler in logger.handlers:
+        handler.setFormatter(ColoredFormatter(
+            '%(asctime)s %(levelname)s %(message)s'))
 
 
 class Vhosts:
@@ -46,7 +49,7 @@ class Vhosts:
         self.domainList = self.domainlist_read_file_generator(
             wordlist, self.domain)
         self.urllist = []
-        self.semaphore = asyncio.Semaphore(5)
+        self.semaphore = asyncio.Semaphore(10)
         if outputFolder.startswith("/"):
             self.outputFolder = outputFolder
         else:
@@ -90,7 +93,7 @@ class Vhosts:
                         self.urllist.append(url)
                         logging.info(f"Found {url} on port {port}")
             except Exception as e:
-                logging.error(f"Error getting {url}: {e}")
+                logging.debug(f"Error getting {url}: {e}")
 
     async def checkForOpenPorts(self):
         tasks = []
@@ -101,7 +104,7 @@ class Vhosts:
         try:
             await asyncio.gather(*tasks)
         except Exception as e:
-            logging.error(f"Error checking for open ports: {e}")
+            logging.debug(f"Error checking for open ports: {e}")
 
     async def getSingleUrl(self, url: str, domain: str):
         try:
@@ -127,12 +130,12 @@ class Vhosts:
                         else:
                             self.finaldict[url][domain] = data
         except Exception as e:
-            logging.error(f"Error getting {url} with domain {domain}: {e}")
+            logging.debug(f"Error getting {url} with domain {domain}: {e}")
 
     def filterUrl(self, url):
         threshold = 5
         if url not in self.finaldict:
-            logging.warning(f"URL {url} not found in finaldict. Skipping...")
+            logging.debug(f"URL {url} not found in finaldict. Skipping...")
             return {}
 
         words_seen = [data["words"] for _, data in self.finaldict[url].items()]
@@ -193,9 +196,15 @@ class Vhosts:
         await asyncio.gather(*tasks)
         filtered_domains = self.filterUrl(url)
         for domain, data in filtered_domains.items():
-            logging.info(f"Found {url} with domain {domain}")
+            status_code = data["status_code"]
+            words = data["words"]
+            lines = data["lines"]
+            chars = data["chars"]
+            logging.info(
+                f"Found {url} {domain} words: {words} lines: {lines} chars: {chars}")
             with open(self.filtereddomainsFile, 'a') as w:
-                w.write(f"{url} {domain}\n")
+                w.write(
+                    f"{url} {domain} words: {words} lines: {lines} chars: {chars}\n")
 
     async def getAllIps(self):
         for url in self.urllist:
@@ -223,7 +232,13 @@ if __name__ == "__main__":
     argparser.add_argument("-o", "--output", required=True, help="Output file")
     argparser.add_argument("-p", "--ports", required=False,
                            help="Ports to scan. if left out, it will scan 80, 8080, 443, 8443, 4443")
+    argparser.add_argument("-l", "--loglevel", required=False,
+                           help="Log level, default is info (example: debug, info, warning, error, critical)")
     args = argparser.parse_args()
+    if args.loglevel:
+        logLevel(args.loglevel)
+    else:
+        logLevel()
     if args.ports:
         ports = [int(port) for port in args.ports.split(",")]
     else:
