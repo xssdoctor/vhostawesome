@@ -89,7 +89,7 @@ class Vhosts:
         async with self.semaphore:
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, verify_ssl=False):
+                    async with session.get(url, timeout=1, verify_ssl=False):
                         self.urllist.append(url)
                         logging.info(f"Found {url} on port {port}")
             except Exception as e:
@@ -113,7 +113,7 @@ class Vhosts:
                 headers["Host"] = domain
             async with self.semaphore:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers, timeout=3, verify_ssl=False) as response:
+                    async with session.get(url, headers=headers, timeout=1, verify_ssl=False) as response:
                         status_code = response.status
                         text = await response.text()
                         words = len(text.split(' '))
@@ -227,8 +227,6 @@ if __name__ == "__main__":
                            help="File containing list of IPs")
     argparser.add_argument(
         "-w", "--wordlist", required=True, help="Wordlist to use")
-    argparser.add_argument("-t", "--threads", required=False,
-                           help="Number of threads to use")
     argparser.add_argument("-o", "--output", required=True, help="Output file")
     argparser.add_argument("-p", "--ports", required=False,
                            help="Ports to scan. if left out, it will scan 80, 8080, 443, 8443, 4443")
@@ -243,12 +241,8 @@ if __name__ == "__main__":
         ports = [int(port) for port in args.ports.split(",")]
     else:
         ports = [80, 8080, 443, 8443, 4443]
-    if args.threads:
-        vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
-                        wordlist=args.wordlist, outputFolder=args.output, ports=ports, workers=int(args.threads))
-    else:
-        vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
-                        wordlist=args.wordlist, ports=ports, outputFolder=args.output)
+    vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
+                    wordlist=args.wordlist, ports=ports, outputFolder=args.output)
 
     asyncio.run(vhosts.makeItSo())
     vhosts.saveAllDataToFile()

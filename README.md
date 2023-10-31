@@ -23,19 +23,28 @@ git clone git@github.com:jad2121/FunWithVhosts.git
 Install the required Python libqraries:
 pip install -r requirements.txt
 
-python vhosts.py -d DOMAIN -i IPLIST -w WORDLIST [-p PORTS] [-o OUTPUT] [-t THREADS]
--d, --domain: The domain to bruteforce.
--i, --iplist: File containing list of IPs.
--w, --wordlist: Wordlist to use for subdomains.
--p, --ports: Ports to scan. If left out, it will scan 80, 8080, 443, 8443, and 4443.
--o, --output: Output directory.
--t, --threads: Number of threads to use.
+usage: vhosts.py [-h] -d DOMAIN -i IPLIST -w WORDLIST -o OUTPUT [-p PORTS] [-l LOGLEVEL]
+
+options:
+-h, --help show this help message and exit
+-d DOMAIN, --domain DOMAIN
+Domain to bruteforce
+-i IPLIST, --iplist IPLIST
+File containing list of IPs
+-w WORDLIST, --wordlist WORDLIST
+Wordlist to use
+-o OUTPUT, --output OUTPUT
+Output file
+-p PORTS, --ports PORTS
+Ports to scan. if left out, it will scan 80, 8080, 443, 8443, 4443
+-l LOGLEVEL, --loglevel LOGLEVEL
+Log level, default is info (example: debug, info, warning, error, critical)
 Example
 
-python vhosts.py -d adjust.com -i ips.txt -w ~/bug_bounty/wordlists/subdomains/best-dns-wordlist.txt -p 443 -o vhostoutput -t 20
-q
+python vhosts.py -d adjust.com -i ips.txt -w ~/bug_bounty/wordlists/subdomains/best-dns-wordlist.txt -p 443 -o vhostoutput -l debug
+
 Contributing
 
-I did not work alone. I had two important contributors: chatGPT and github copilot. 
+I did not work alone. I had two important contributors: chatGPT and github copilot.
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
