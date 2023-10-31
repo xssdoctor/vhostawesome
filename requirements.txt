@@ -1,2 +1,4 @@
 requests
 termcolor
+aiohttp
+numpy

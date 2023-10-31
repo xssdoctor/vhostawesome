@@ -1,16 +1,15 @@
-import requests
-from concurrent.futures import ThreadPoolExecutor
+import aiohttp
 import argparse
 import logging
-from itertools import repeat
 import os
 import json
+import asyncio
 import urllib3
+import numpy as np
 from termcolor import colored
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 cwd = os.getcwd()
-
 
 
 class ColoredFormatter(logging.Formatter):
@@ -21,9 +20,12 @@ class ColoredFormatter(logging.Formatter):
         'ERROR': 'red',
         'CRITICAL': 'red',
     }
+
     def format(self, record):
         log_message = super().format(record)
         return colored(log_message, self.COLORS.get(record.levelname))
+
+
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
@@ -32,6 +34,7 @@ for handler in logger.handlers:
     handler.setFormatter(ColoredFormatter(
         '%(asctime)s %(levelname)s %(message)s'))
 
+
 class Vhosts:
     def __init__(self, domain: str, iplistFile: str, wordlist: str, outputFolder: str, ports: list, workers=50):
         self.ports = ports
@@ -39,7 +42,11 @@ class Vhosts:
         self.filtered_dict = {}
         self.domain = domain
         self.workers = workers
-        self.iplist = []
+        self.iplist = self.iplist_read_file_generator(iplistFile)
+        self.domainList = self.domainlist_read_file_generator(
+            wordlist, self.domain)
+        self.urllist = []
+        self.semaphore = asyncio.Semaphore(5)
         if outputFolder.startswith("/"):
             self.outputFolder = outputFolder
         else:
@@ -50,110 +57,159 @@ class Vhosts:
             except Exception as e:
                 logging.error(f"Error creating output folder: {e}")
         self.filtereddomainsFile = os.path.join(
-             self.outputFolder, "filtereddomains.txt")
+            self.outputFolder, "filtereddomains.txt")
         self.allDomainInfoFile = os.path.join(self.outputFolder, "all.txt")
-        self.domainList = []
+
+    def domainlist_read_file_generator(self, filename, domain):
+        domains = []
         try:
-            with open(wordlist, 'r') as r:
-                for word in r.read().splitlines():
-                    self.domainList.append(f"{word}.{domain}")
-            with open(iplistFile, 'r') as r:
-                self.iplist = r.read().splitlines()
+            with open(filename, 'r') as file:
+                for line in file:
+                    domains.append(f"{line.strip()}.{domain}")
         except Exception as e:
             logging.error(f"Error reading file: {e}")
-        self.urllist = []
-    def _checkPort(self, ip, port):
+        return domains
+
+    def iplist_read_file_generator(self, filename):
+        ips = []
+        try:
+            with open(filename, 'r') as file:
+                for line in file:
+                    ips.append(line.strip())
+        except Exception as e:
+            logging.error(f"Error reading file: {e}")
+        return ips
+
+    async def _checkPort(self, ip, port):
         url = f"https://{ip}:{port}" if port in [443,
                                                  8443, 4443] else f"http://{ip}:{port}"
+        async with self.semaphore:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, verify_ssl=False):
+                        self.urllist.append(url)
+                        logging.info(f"Found {url} on port {port}")
+            except Exception as e:
+                logging.error(f"Error getting {url}: {e}")
+
+    async def checkForOpenPorts(self):
+        tasks = []
+        for ip in self.iplist:
+            for port in self.ports:
+                task = asyncio.create_task(self._checkPort(ip, port))
+                tasks.append(task)
         try:
-            requests.get(url, timeout=3, verify=False)
-            self.urllist.append(url)
-            logging.info(f"Found {url} on port {port}")
-        except:
-            pass
-    def checkForOpenPorts(self):
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            for ip in self.iplist:
-                for port in self.ports:
-                    executor.submit(self._checkPort, ip, port)
-    def getSingleUrl(self, url: str, domain: str):
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            logging.error(f"Error checking for open ports: {e}")
+
+    async def getSingleUrl(self, url: str, domain: str):
         try:
             headers = {}
             if domain:
                 headers["Host"] = domain
-            r = requests.get(url, headers=headers, timeout=3, verify=False)
-            status_code = r.status_code
-            words = len(r.text.split(' '))
-            lines = len(r.text.split('\n'))
-            chars = len(r.text)
-            data = {
-                "status_code": status_code,
-                "words": words,
-                "lines": lines,
-                "chars": chars
-            }
-            if url not in self.finaldict:
-                self.finaldict[url] = {}
-            # Update the data for the specific domain under the given URL
-            self.finaldict[url][domain] = data
+            async with self.semaphore:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, headers=headers, timeout=3, verify_ssl=False) as response:
+                        status_code = response.status
+                        text = await response.text()
+                        words = len(text.split(' '))
+                        lines = len(text.split('\n'))
+                        chars = len(text)
+                        data = {
+                            "status_code": status_code,
+                            "words": words,
+                            "lines": lines,
+                            "chars": chars
+                        }
+                        if url not in self.finaldict:
+                            self.finaldict[url] = {domain: data}
+                        else:
+                            self.finaldict[url][domain] = data
         except Exception as e:
-            logging.error(f"Error getting {url}: {e}")
+            logging.error(f"Error getting {url} with domain {domain}: {e}")
+
     def filterUrl(self, url):
         threshold = 5
         if url not in self.finaldict:
             logging.warning(f"URL {url} not found in finaldict. Skipping...")
             return {}
+
+        words_seen = [data["words"] for _, data in self.finaldict[url].items()]
+        lines_seen = [data["lines"] for _, data in self.finaldict[url].items()]
         status_codes = [data["status_code"]
                         for _, data in self.finaldict[url].items()]
-        sc_frequent = max(set(status_codes), key=status_codes.count)
+
+        def variance(numbers):
+            mean = sum(numbers) / len(numbers)
+            return sum((x - mean) ** 2 for x in numbers) / len(numbers)
+
+        variances = {
+            "words": variance(words_seen),
+            "lines": variance(lines_seen),
+            "status_codes": variance(status_codes),
+        }
+
+        logging.debug(f"Variances: {variances}")
+
+        primary_metric = max(variances, key=variances.get)
+
+        logging.debug(f"Primary metric: {primary_metric}")
+
         filtered_domains = {}
-        for domain, data in self.finaldict[url].items():
-            # 1. Filter based on status code deviation
-            if data["status_code"] != sc_frequent:
-                filtered_domains[domain] = data
+        if primary_metric == "words":
+            words_frequent = max(set(words_seen), key=words_seen.count)
+            for domain, data in self.finaldict[url].items():
+                if data["words"] != words_frequent:
+                    filtered_domains[domain] = data
+        elif primary_metric == "lines":
+            lines_frequent = max(set(lines_seen), key=lines_seen.count)
+            for domain, data in self.finaldict[url].items():
+                if data["lines"] != lines_frequent:
+                    filtered_domains[domain] = data
+        elif primary_metric == "status_codes":
+            sc_frequent = max(set(status_codes), key=status_codes.count)
+            for domain, data in self.finaldict[url].items():
+                if data["status_code"] != sc_frequent:
+                    filtered_domains[domain] = data
 
-        if not filtered_domains:  # If no domains have been filtered yet based on status code
-            words_seen = [data["words"]
-                          for _, data in self.finaldict[url].items()]
-            words_variance = sum(
-                [(x - sum(words_seen) / len(words_seen)) ** 2 for x in words_seen]) / len(words_seen)
-            if words_variance > threshold:  # If word counts are unreliable
-                # 3. Filter based on lines
-                lines_seen = [data["lines"]
-                              for _, data in self.finaldict[url].items()]
-                lines_frequent = max(set(lines_seen), key=lines_seen.count)
-                for domain, data in self.finaldict[url].items():
-                    if data["lines"] != lines_frequent:
-                         filtered_domains[domain] = data
-            else:
-                # 2. Filter based on words
-                words_frequent = max(set(words_seen), key=words_seen.count)
-                for domain, data in self.finaldict[url].items():
-                    if data["words"] != words_frequent:
-                        filtered_domains[domain] = data
+        logging.debug(f"Filtered domains: {filtered_domains}")
+
         return filtered_domains
-    def getAllDomainsFromUrl(self, url: str):
-        logging.info(f"Trying {url}")
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-             executor.map(self.getSingleUrl, repeat(
-                 url, len(self.domainList)), self.domainList)
-        filtered = self.filterUrl(url)
-        for domain, data in filtered.items():
-            logging.critical(f"found {url}: {domain}")
-            try:
-                with open(self.filtereddomainsFile, 'a') as w:
-                    w.write(f"{url}: {domain}\n")
-            except Exception as e:
-                logging.error(f"Error writing to file: {e}")
-    def getAllIps(self):
-         for url in self.urllist:
-             self.getAllDomainsFromUrl(url)
 
-    def makeItSo(self):
+    def saveAllDataToFile(self):
+        try:
+            with open(os.path.join(self.outputFolder, 'alldata.json'), 'w') as w:
+                json.dump(self.finaldict, w)
+        except Exception as e:
+            logging.error(f"Error writing to file: {e}")
+
+    async def getAllDomainsFromUrl(self, url: str):
+        # logging.info(f"Trying {url}")
+        tasks = []
+        for domain in self.domainList:
+            task = asyncio.create_task(self.getSingleUrl(url, domain))
+            tasks.append(task)
+        await asyncio.gather(*tasks)
+        filtered_domains = self.filterUrl(url)
+        for domain, data in filtered_domains.items():
+            logging.info(f"Found {url} with domain {domain}")
+            with open(self.filtereddomainsFile, 'a') as w:
+                w.write(f"{url} {domain}\n")
+
+    async def getAllIps(self):
+        for url in self.urllist:
+            await self.getAllDomainsFromUrl(url)
+
+    async def makeItSo(self):
         logging.info("Checking for open ports")
-        self.checkForOpenPorts()
-        logging.info("Checking for domains")
-        self.getAllIps()
+        async with aiohttp.ClientSession():
+            await self.checkForOpenPorts()
+            logging.info("Checking for domains")
+            tasks = [self.getAllDomainsFromUrl(url) for url in self.urllist]
+            await asyncio.gather(*tasks)
+
+
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("-d", "--domain", required=True,
@@ -163,7 +219,7 @@ if __name__ == "__main__":
     argparser.add_argument(
         "-w", "--wordlist", required=True, help="Wordlist to use")
     argparser.add_argument("-t", "--threads", required=False,
-                            help="Number of threads to use")
+                           help="Number of threads to use")
     argparser.add_argument("-o", "--output", required=True, help="Output file")
     argparser.add_argument("-p", "--ports", required=False,
                            help="Ports to scan. if left out, it will scan 80, 8080, 443, 8443, 4443")
@@ -171,17 +227,13 @@ if __name__ == "__main__":
     if args.ports:
         ports = [int(port) for port in args.ports.split(",")]
     else:
-         ports = [80, 8080, 443, 8443, 4443]
+        ports = [80, 8080, 443, 8443, 4443]
     if args.threads:
-         global vhosts
-         vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
-                         wordlist=args.wordlist, outputFolder=args.output, ports=ports, workers=int(args.threads))
+        vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
+                        wordlist=args.wordlist, outputFolder=args.output, ports=ports, workers=int(args.threads))
     else:
         vhosts = Vhosts(domain=args.domain, iplistFile=args.iplist,
                         wordlist=args.wordlist, ports=ports, outputFolder=args.output)
-    vhosts.makeItSo()
-    try:
-        with open(vhosts.allDomainInfoFile, 'w') as w:
-            json.dump(vhosts.finaldict, w)
-    except Exception as e:
-        logging.error(f"Error writing to file: {e}")
+
+    asyncio.run(vhosts.makeItSo())
+    vhosts.saveAllDataToFile()
