@@ -201,10 +201,10 @@ class Vhosts:
             lines = data["lines"]
             chars = data["chars"]
             logging.info(
-                f"Found {url} {domain} words: {words} lines: {lines} chars: {chars}")
+                f"Found {url} {domain} words: status_code: {status_code} {words} lines: {lines} chars: {chars}")
             with open(self.filtereddomainsFile, 'a') as w:
                 w.write(
-                    f"{url} {domain} words: {words} lines: {lines} chars: {chars}\n")
+                    f"{url} {domain} status_code: {status_code} words: {words} lines: {lines} chars: {chars}\n")
 
     async def getAllIps(self):
         for url in self.urllist:
